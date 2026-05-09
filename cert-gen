@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GRN='\033[0;32m'; RED='\033[0;31m'; RST='\033[0m'
+log() { printf "${GRN}▸ %s${RST}\n" "$*"; }
+ok()  { printf "${GRN}✓ %s${RST}\n" "$*"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG="${SCRIPT_DIR}/config.env"
+
+if [[ ! -f "$CONFIG" ]]; then
+  printf "${RED}✗ config.env not found — copy config.env.example to config.env and edit it${RST}\n" >&2
+  exit 1
+fi
+
+source "$CONFIG"
+
+# Parse --debug flag
+DEBUG=false
+ARGS=()
+for a in "$@"; do [[ "$a" == "--debug" ]] && DEBUG=true || ARGS+=("$a"); done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+if $DEBUG; then
+  trap 'printf "${RED}✗ Failed at line %s${RST}\n" "$LINENO" >&2' ERR
+else
+  trap 'printf "${RED}✗ Failed — re-run with --debug for details${RST}\n" >&2' ERR
+fi
+
+SSH_Q="-q"; $DEBUG && SSH_Q=""
+
+usage() {
+  echo "Usage: $(basename "$0") [--debug] <hostname> [dns:<name>|ip:<addr> ...]"
+  echo "  Example: $(basename "$0") myserver dns:myserver.local ip:192.168.1.10"
+  exit 1
+}
+
+if [[ $# -lt 1 ]]; then
+  read -rp "Hostname: " HOSTNAME
+  [[ -z "$HOSTNAME" ]] && usage
+else
+  HOSTNAME="$1"; shift
+fi
+
+SANS="DNS:${HOSTNAME}"
+for san in "$@"; do
+  case "$san" in
+    dns:*) SANS="${SANS},DNS:${san#dns:}" ;;
+    ip:*)  SANS="${SANS},IP:${san#ip:}" ;;
+    *) printf "${RED}✗ Unrecognized SAN '%s' — use dns:<name> or ip:<addr>${RST}\n" "$san"; exit 1 ;;
+  esac
+done
+
+REMOTE_DIR="/tmp/certgen-${HOSTNAME}-$$"
+LOCAL_DEST="${LOCAL_OUTPUT}/${HOSTNAME}"
+
+log "Connecting to CA..."
+ssh $SSH_Q "${CA_HOST}" "mkdir -p ${REMOTE_DIR}"
+ok "Connected"
+
+REMOTE_SCRIPT=$(mktemp)
+trap 'rm -f "$REMOTE_SCRIPT"' EXIT
+
+cat > "$REMOTE_SCRIPT" <<SCRIPT
+set -euo pipefail
+
+cat > "${REMOTE_DIR}/cert.cnf" <<CNF
+[req]
+distinguished_name = dn
+req_extensions = san
+prompt = no
+
+[dn]
+CN = ${HOSTNAME}
+O = ${ORG}
+OU = ${OU}
+C = ${COUNTRY}
+
+[san]
+subjectAltName = ${SANS}
+CNF
+
+openssl genrsa -out "${REMOTE_DIR}/${HOSTNAME}.key" ${KEY_BITS} 2>/dev/null
+
+openssl req -new \\
+  -key "${REMOTE_DIR}/${HOSTNAME}.key" \\
+  -out "${REMOTE_DIR}/${HOSTNAME}.csr" \\
+  -config "${REMOTE_DIR}/cert.cnf" \\
+  2>/dev/null
+
+openssl x509 -req \\
+  -in "${REMOTE_DIR}/${HOSTNAME}.csr" \\
+  -CA ${CA_CERT} \\
+  -CAkey ${CA_KEY} \\
+  -CAcreateserial \\
+  -out "${REMOTE_DIR}/${HOSTNAME}.crt" \\
+  -days ${CERT_DAYS} \\
+  -extfile "${REMOTE_DIR}/cert.cnf" \\
+  -extensions san
+
+cat "${REMOTE_DIR}/${HOSTNAME}.crt" ${CA_CERT} > "${REMOTE_DIR}/fullchain.pem"
+
+openssl pkcs12 -export -legacy \\
+  -out "${REMOTE_DIR}/${HOSTNAME}.pfx" \\
+  -inkey "${REMOTE_DIR}/${HOSTNAME}.key" \\
+  -in "${REMOTE_DIR}/${HOSTNAME}.crt" \\
+  -certfile ${CA_CERT} \\
+  -passout pass: 2>/dev/null
+SCRIPT
+
+log "Generating key and CSR..."
+scp $SSH_Q "$REMOTE_SCRIPT" "${CA_HOST}:${REMOTE_DIR}/run.sh"
+
+log "Signing certificate..."
+ssh -t $SSH_Q "${CA_HOST}" "bash ${REMOTE_DIR}/run.sh"
+ok "Certificate signed"
+
+log "Retrieving files..."
+mkdir -p "${LOCAL_DEST}"
+scp $SSH_Q \
+  "${CA_HOST}:${REMOTE_DIR}/${HOSTNAME}.key" \
+  "${CA_HOST}:${REMOTE_DIR}/${HOSTNAME}.crt" \
+  "${CA_HOST}:${REMOTE_DIR}/${HOSTNAME}.csr" \
+  "${CA_HOST}:${REMOTE_DIR}/${HOSTNAME}.pfx" \
+  "${CA_HOST}:${REMOTE_DIR}/fullchain.pem" \
+  "${LOCAL_DEST}/"
+
+chmod 600 "${LOCAL_DEST}/${HOSTNAME}.key"
+ssh $SSH_Q "${CA_HOST}" "rm -rf '${REMOTE_DIR}'"
+
+ok "Done — ${LOCAL_DEST}/"
+printf "    ${GRN}%s${RST}\n" \
+  "${HOSTNAME}.crt" \
+  "${HOSTNAME}.key" \
+  "${HOSTNAME}.csr" \
+  "${HOSTNAME}.pfx" \
+  "fullchain.pem"
