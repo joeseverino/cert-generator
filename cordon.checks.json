@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/joeseverino/cordon/main/checks/config.schema.json",
+  "commands": [
+    {
+      "id": "shellcheck-cert-gen",
+      "name": "cert-gen passes ShellCheck",
+      "effect": "read",
+      "requires": ["shellcheck"],
+      "exec": { "cmd": "shellcheck", "args": ["cert-gen"] },
+      "fix": "Run `shellcheck cert-gen`."
+    }
+  ]
+}

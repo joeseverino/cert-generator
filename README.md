@@ -1,6 +1,6 @@
 # cert-generator
 
-Issues TLS certificates signed by a private root CA running on an offline VM. Connects via SSH, generates the key and CSR on the CA host, signs the cert, retrieves the output, and cleans up. The private key never leaves the CA VM during the process.
+Issues TLS certificates signed by a private root CA running on an offline VM. Connects via SSH, generates the key and CSR on the CA host, signs the cert, retrieves the output, and cleans up. The CA key never leaves the CA VM.
 
 Stack: Bash + OpenSSL + SSH
 
@@ -80,6 +80,7 @@ Each run creates a subdirectory under `LOCAL_OUTPUT/<hostname>/`:
 - RSA 4096-bit key
 - 825-day validity (macOS and browser maximum for private certs)
 - SAN extension included for all specified DNS names and IPs
+- Server certificate profile: `CA:FALSE`, `digitalSignature, keyEncipherment`, `serverAuth`
 - Signed with `-CAcreateserial` — CA serial file managed automatically on the CA host
 
 ---
